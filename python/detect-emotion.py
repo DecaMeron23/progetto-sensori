@@ -23,13 +23,14 @@ while True:
     for (x, y, w, h) in faces:
         # Extract the face ROI (Region of Interest)
         face_roi = rgb_frame[y:y + h, x:x + w]
-
+        
         # Perform emotion analysis on the face ROI
         result = DeepFace.analyze(face_roi, actions=['emotion'], enforce_detection=False)
 
         # Determine the dominant emotion
         emotion = result[0]['dominant_emotion']
         # age = result[0]['age']
+
 
         # Draw rectangle around face and label with predicted emotion
         cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)

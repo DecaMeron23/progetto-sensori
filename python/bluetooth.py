@@ -1,7 +1,12 @@
 import asyncio
 from bleak import BleakScanner, BleakClient, BleakError
 import numpy as np
-from PIL import Image
+import cv2
+
+from deepface import DeepFace
+# Load face cascade classifier
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
 
 # UUID del servizio e delle caratteristiche (devono combaciare con lo sketch Arduino)
 SERVICE_UUID      = "19B10000-E8F2-537E-4F6C-D104768A1214"
@@ -10,10 +15,27 @@ STATUS_CHAR_UUID  = "19B10002-E8F2-537E-4F6C-D104768A1214"
 IMAGE_CHAR_UUID   = "19B10003-E8F2-537E-4F6C-D104768A1214"
 
 # Dimensioni immagine NICLA (come nello sketch)
-WIDTH = 160
-HEIGHT = 120
-BYTES_PER_PIXEL = 2
+WIDTH = int(160/2)
+HEIGHT = int(120/2)
+BYTES_PER_PIXEL = 1
 FRAME_SIZE = WIDTH * HEIGHT * BYTES_PER_PIXEL  # 160 * 120 * 2 = 38400
+
+
+def gray_to_image(data: bytes) -> np.ndarray:
+    """
+    Converte un buffer gray scale (160x120) in un array numpy (uint8).
+    `data` deve avere lunghezza FRAME_SIZE.
+    """
+    if len(data) != FRAME_SIZE:
+        raise ValueError(f"Dati dimensione errata: {len(data)} byte, attesi {FRAME_SIZE}")
+    
+    # Converti i byte direttamente in array numpy
+    gray_array = np.frombuffer(data, dtype=np.uint8)
+    
+    # Rimodella alle dimensioni dell'immagine
+    gray_image = gray_array.reshape((HEIGHT, WIDTH))
+    
+    return gray_image
 
 
 def rgb565_to_rgb888(data: bytes) -> np.ndarray:
@@ -50,6 +72,13 @@ async def find_nicla_cam():
         print(f"-> Using NiclaCam at {nicla_device.address}")
     return nicla_device
 
+def filtro_emozioni(emozione):
+    if emozione == 'happy':
+        return 'felice'
+    elif emozione == 'surprise':
+        return 'sorpreso'
+    return 'sconosciuto'
+
 
 async def main():
     device = await find_nicla_cam()
@@ -66,13 +95,16 @@ async def main():
     def notification_handler(handle, data: bytes):
         nonlocal image_data
         image_data.extend(data)
-        print(f"Received chunk: {len(data)} bytes (total: {len(image_data)}/{FRAME_SIZE})")
+        # print(f"Received chunk: {len(data)} bytes (total: {len(image_data)}/{FRAME_SIZE})")
 
     try:
         async with BleakClient(address, timeout=20.0) as client:
             print("Connected, reading services...")
-
             svcs = client.services
+
+            print("Reading services...")
+            svcs = client.services
+            
             if svcs is None:
                 print("Nessun servizio trovato (services è None). Probabile disconnessione.")
                 return
@@ -83,41 +115,79 @@ async def main():
                 for ch in s.characteristics:
                     print(f"    Char: {ch.uuid}, props={ch.properties}")
 
-            # <<< QUI IL FIX >>>
             service_uuids = [s.uuid.lower() for s in svcs]
             if SERVICE_UUID.lower() not in service_uuids:
                 print("Servizio camera non trovato sul dispositivo.")
                 return
+            while(True):
+                image_data = bytearray()
 
-            print("Starting notifications on IMAGE_CHAR...")
-            await client.start_notify(IMAGE_CHAR_UUID, notification_handler)
+                print("Starting notifications on IMAGE_CHAR...")
+                await client.start_notify(IMAGE_CHAR_UUID, notification_handler)
 
-            print("Sending capture command (1) to CONTROL_CHAR...")
-            await client.write_gatt_char(CONTROL_CHAR_UUID, bytearray([1]), response=True)
+                print("Sending capture command (1) to CONTROL_CHAR...")
+                await client.write_gatt_char(CONTROL_CHAR_UUID, bytearray([1]), response=True)
 
-            # Aspetta che i dati arrivino (o timeout)
-            timeout_s = 15.0
-            waited = 0.0
-            interval = 0.1
+                # Aspetta che i dati arrivino (o timeout)
+                timeout_s = 15.0
+                waited = 0.0
+                interval = 0.01
 
-            while len(image_data) < FRAME_SIZE and waited < timeout_s:
-                await asyncio.sleep(interval)
-                waited += interval
+                while len(image_data) < FRAME_SIZE and waited < timeout_s:
+                    await asyncio.sleep(interval)
+                    waited += interval
 
-            await client.stop_notify(IMAGE_CHAR_UUID)
+                await client.stop_notify(IMAGE_CHAR_UUID)
 
-            if len(image_data) < FRAME_SIZE:
-                print(f"Timeout: ricevuti solo {len(image_data)} byte su {FRAME_SIZE} attesi.")
-                return
+                if len(image_data) < FRAME_SIZE:
+                    print(f"Timeout: ricevuti solo {len(image_data)} byte su {FRAME_SIZE} attesi.")
+                    return
 
-            frame_bytes = bytes(image_data[:FRAME_SIZE])
-            print("Frame completo ricevuto, convertendo in immagine...")
+                frame_bytes = bytes(image_data[:FRAME_SIZE])
+                print("Frame completo ricevuto, convertendo in immagine...")
 
-            rgb_img = rgb565_to_rgb888(frame_bytes)
-            img = Image.fromarray(rgb_img, mode='RGB')
-            img.save("nicla_ble_frame.png")
-            print("Immagine salvata come nicla_ble_frame.png")
-            img.show()
+
+                FATTORE = 8
+                img = np.frombuffer(frame_bytes, dtype=np.uint8).reshape(HEIGHT, WIDTH)
+                img = cv2.resize(img , (WIDTH*FATTORE , HEIGHT*FATTORE))
+                rgb_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+
+                # cv2.imshow("fotina" , img)
+                # cv2.waitKey(0)
+                # Detect faces in the frame
+                faces = face_cascade.detectMultiScale(img, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+                for (x, y, w, h) in faces:
+                    # Extract the face ROI (Region of Interest)
+                    face_roi = rgb_img[y:y + h, x:x + w]
+
+                    # Perform emotion analysis on the face ROI
+                    result = DeepFace.analyze(face_roi, actions=['emotion'], enforce_detection=False)
+
+                    # Determine the dominant emotion
+                    emotion = result[0]['dominant_emotion']
+                    # age = result[0]['age']
+
+                    emotion = filtro_emozioni(emotion)
+
+                    # Draw rectangle around face and label with predicted emotion
+                    cv2.rectangle(rgb_img, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                    cv2.putText(rgb_img, f"{emotion}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
+                    print(emotion)
+
+                # # Display the resulting img
+                cv2.imshow('Real-time Emotion Detection', rgb_img)
+                # Press 'q' to exit
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+
+
+            # gray_img = gray_to_image(frame_bytes)
+            # # rgb_img = rgb565_to_rgb888(frame_bytes)
+            # img = Image.fromarray(gray_img, mode='L')
+            # img.save("nicla_ble_frame.png")
+            # print("Immagine salvata come nicla_ble_frame.png")
+            # img.show()
 
     except BleakError as e:
         print("Errore BLE:", e)
