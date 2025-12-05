@@ -1,0 +1,6 @@
+# Rimozione venv
+**/.venv/
+
+# Rimozione code
+**/.vscode/
+
