@@ -154,7 +154,7 @@ async def ricevi_dati(image_data, notification_handler, client):
     waited = 0.0
     interval = 0.1
 
-                # Attesa della ricezione dei dati
+    # Attesa della ricezione dei dati
     while len(image_data) < FRAME_SIZE and waited < timeout_s:
         await asyncio.sleep(interval)
         waited += interval
